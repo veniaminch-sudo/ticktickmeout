@@ -15,7 +15,7 @@ TOKENS_FILE = "/data/tokens.json"
 
 AUTH_URL = "https://ticktick.com/oauth/authorize"
 TOKEN_URL = "https://ticktick.com/oauth/token"
-API_BASE = "https://api.ticktick.com/api/v2"
+API_BASE = "https://api.ticktick.com/open/v1"
 
 
 def load_tokens():
@@ -31,31 +31,15 @@ def save_tokens(tokens: dict):
         json.dump(tokens, f)
 
 
-def refresh_access_token(tokens: dict):
-    response = httpx.post(
-        TOKEN_URL,
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": tokens["refresh_token"],
-        },
-        auth=(CLIENT_ID, CLIENT_SECRET),
-    )
-    response.raise_for_status()
-    new_tokens = response.json()
-    new_tokens["saved_at"] = time.time()
-    save_tokens(new_tokens)
-    return new_tokens
-
-
 def get_valid_token():
     tokens = load_tokens()
     if not tokens:
         raise Exception("Not authorized. Visit /ticktick/auth first.")
-    # Refresh if expires in less than 5 minutes
+    # Token expires_in is ~180 days, no refresh_token from TickTick
     expires_in = tokens.get("expires_in", 3600)
     saved_at = tokens.get("saved_at", 0)
     if time.time() - saved_at > expires_in - 300:
-        tokens = refresh_access_token(tokens)
+        raise Exception("Token expired. Re-authorize at /ticktick/auth")
     return tokens["access_token"]
 
 
@@ -96,53 +80,39 @@ async def callback(request: Request):
 @app.get("/ticktick/tasks")
 async def get_tasks():
     token = get_valid_token()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today_date = datetime.now().date()
+    headers = {"Authorization": f"Bearer {token}"}
 
-    response = httpx.get(
-        f"{API_BASE}/task/closed",
-        headers={"Authorization": f"Bearer {token}"},
-        params={"from": today, "to": today, "limit": 50},
-    )
-
-    # Get all projects to find today's tasks
-    projects_resp = httpx.get(
-        f"{API_BASE}/projects",
-        headers={"Authorization": f"Bearer {token}"},
-    )
+    # Get all projects
+    projects_resp = httpx.get(f"{API_BASE}/project", headers=headers)
+    projects = {}
+    open_project_ids = []
+    if projects_resp.status_code == 200:
+        for p in projects_resp.json():
+            projects[p["id"]] = p["name"]
+            if not p.get("closed") and p.get("kind") == "TASK":
+                open_project_ids.append(p["id"])
 
     tasks_today = []
     overdue = []
+    no_date = []
 
-    if projects_resp.status_code == 200:
-        projects = {p["id"]: p["name"] for p in projects_resp.json()}
-    else:
-        projects = {}
-
-    # Get uncompleted tasks
-    all_tasks_resp = httpx.get(
-        f"{API_BASE}/batch/check/0",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-
-    if all_tasks_resp.status_code == 200:
-        data = all_tasks_resp.json()
-        sync_tasks = data.get("syncTaskBean", {}).get("update", [])
-
-        now = datetime.now(timezone.utc)
-        today_date = datetime.now().date()
-
-        for task in sync_tasks:
+    # Fetch tasks from each open project
+    for pid in open_project_ids:
+        resp = httpx.get(f"{API_BASE}/project/{pid}/data", headers=headers)
+        if resp.status_code != 200:
+            continue
+        data = resp.json()
+        for task in data.get("tasks", []):
             if task.get("status") != 0:
                 continue
             due_date = task.get("dueDate")
-            project_name = projects.get(task.get("projectId"), "Inbox")
             task_info = {
                 "title": task.get("title"),
-                "project": project_name,
+                "project": projects.get(task.get("projectId"), "Inbox"),
                 "priority": task.get("priority", 0),
                 "due": due_date,
             }
-
             if due_date:
                 due = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
                 if due.date() == today_date:
@@ -150,12 +120,17 @@ async def get_tasks():
                 elif due.date() < today_date:
                     overdue.append(task_info)
             else:
-                tasks_today.append(task_info)
+                no_date.append(task_info)
+
+    # Sort by priority (higher first)
+    tasks_today.sort(key=lambda t: t["priority"], reverse=True)
+    overdue.sort(key=lambda t: t["priority"], reverse=True)
 
     return JSONResponse({
         "today": tasks_today,
         "overdue": overdue,
-        "date": today,
+        "no_date": no_date,
+        "date": str(today_date),
     })
 
 

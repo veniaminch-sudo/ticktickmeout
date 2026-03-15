@@ -143,6 +143,37 @@ async def get_tasks():
     })
 
 
+@app.get("/ticktick/projects")
+async def get_projects():
+    token = get_valid_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = httpx.get(f"{API_BASE}/project", headers=headers)
+    resp.raise_for_status()
+    return JSONResponse([
+        {"id": p["id"], "name": p["name"], "kind": p.get("kind")}
+        for p in resp.json()
+        if not p.get("closed")
+    ])
+
+
+@app.post("/ticktick/tasks/create")
+async def create_task(request: Request):
+    token = get_valid_token()
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    body = await request.json()
+    # Required: title, projectId. Optional: content, desc, priority, dueDate
+    payload = {
+        "title": body["title"],
+        "projectId": body["projectId"],
+    }
+    for field in ("content", "desc", "priority", "dueDate", "startDate"):
+        if field in body:
+            payload[field] = body[field]
+    resp = httpx.post(f"{API_BASE}/task", headers=headers, json=payload)
+    resp.raise_for_status()
+    return JSONResponse(resp.json())
+
+
 @app.get("/ticktick/status")
 async def status():
     tokens = load_tokens()

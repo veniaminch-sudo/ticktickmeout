@@ -17,6 +17,15 @@ AUTH_URL = "https://ticktick.com/oauth/authorize"
 TOKEN_URL = "https://ticktick.com/oauth/token"
 API_BASE = "https://api.ticktick.com/open/v1"
 
+# Only fetch tasks from these projects
+ALLOWED_PROJECTS = {
+    "66ed773f99c75168c1d3d420",  # 🗓Стратегия
+    "679e38696067d16f8b792da4",  # 🎴Тактика
+    "69941ded8ba9513260157a7b",  # 🐧Наш список
+    "699afac358b951c08d3e671e",  # Плэнсы с планерки
+    "68aad622f99291ab56312d51",  # 🌇Высоко
+}
+
 
 def load_tokens():
     if os.path.exists(TOKENS_FILE):
@@ -90,7 +99,7 @@ async def get_tasks():
     if projects_resp.status_code == 200:
         for p in projects_resp.json():
             projects[p["id"]] = p["name"]
-            if not p.get("closed") and p.get("kind") == "TASK":
+            if not p.get("closed") and p.get("kind") == "TASK" and p["id"] in ALLOWED_PROJECTS:
                 open_project_ids.append(p["id"])
 
     tasks_today = []

@@ -3,8 +3,9 @@ import json
 import time
 import httpx
 from datetime import datetime, timezone
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Query
 from fastapi.responses import RedirectResponse, JSONResponse
+from typing import Optional
 
 app = FastAPI()
 
@@ -87,7 +88,7 @@ async def callback(request: Request):
 
 
 @app.get("/ticktick/tasks")
-async def get_tasks():
+async def get_tasks(projectId: Optional[str] = Query(None)):
     token = get_valid_token()
     today_date = datetime.now().date()
     headers = {"Authorization": f"Bearer {token}"}
@@ -99,8 +100,12 @@ async def get_tasks():
     if projects_resp.status_code == 200:
         for p in projects_resp.json():
             projects[p["id"]] = p["name"]
-            if not p.get("closed") and p.get("kind") == "TASK" and p["id"] in ALLOWED_PROJECTS:
-                open_project_ids.append(p["id"])
+            if not p.get("closed") and p.get("kind") == "TASK":
+                if projectId:
+                    if p["id"] == projectId:
+                        open_project_ids.append(p["id"])
+                elif p["id"] in ALLOWED_PROJECTS:
+                    open_project_ids.append(p["id"])
 
     tasks_today = []
     overdue = []

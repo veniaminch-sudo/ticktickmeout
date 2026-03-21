@@ -19,13 +19,12 @@ TOKEN_URL = "https://ticktick.com/oauth/token"
 API_BASE = "https://api.ticktick.com/open/v1"
 API_V2_BASE = "https://api.ticktick.com/api/v2"
 
-# Only fetch tasks from these projects
 ALLOWED_PROJECTS = {
-    "66ed773f99c75168c1d3d420",  # 🗓Стратегия
-    "679e38696067d16f8b792da4",  # 🎴Тактика
-    "699327944c495119bf8610d9",  # 🐧Наш список
-    "699afac358b951c08d3e671e",  # Плэнсы с планерки
-    "68aad622f99291ab56312d51",  # 🌇Высоко
+    "66ed773f99c75168c1d3d420",
+    "679e38696067d16f8b792da4",
+    "699327944c495119bf8610d9",
+    "699afac358b951c08d3e671e",
+    "68aad622f99291ab56312d51",
 }
 
 
@@ -101,7 +100,6 @@ async def get_tasks(
     from_dt = date.fromisoformat(fromDate) if fromDate else None
     to_dt = date.fromisoformat(toDate) if toDate else None
 
-    # Get all projects
     projects_resp = httpx.get(f"{API_BASE}/project", headers=headers)
     projects = {}
     open_project_ids = []
@@ -121,19 +119,19 @@ async def get_tasks(
     completed = []
 
     for pid in open_project_ids:
-        # Fetch active tasks
         resp = httpx.get(f"{API_BASE}/project/{pid}/data", headers=headers)
         if resp.status_code == 200:
             data = resp.json()
+            # Process ALL tasks from /data (including completed ones)
             for task in data.get("tasks", []):
                 _process_task(task, projects, today_date, from_dt, to_dt,
                               tasks_today, overdue, no_date, completed,
                               include_completed=includeCompleted)
-
-        # Fetch completed tasks via unofficial v2 API
-        if includeCompleted:
-            _fetch_completed_v2(pid, headers, projects, today_date,
-                                from_dt, to_dt, completed)
+            # Also check completedItems if present
+            for task in data.get("completedItems", []):
+                _process_task(task, projects, today_date, from_dt, to_dt,
+                              tasks_today, overdue, no_date, completed,
+                              include_completed=True, force_completed=True)
 
     tasks_today.sort(key=lambda t: t["priority"], reverse=True)
     overdue.sort(key=lambda t: t["priority"], reverse=True)
@@ -151,68 +149,67 @@ async def get_tasks(
     return JSONResponse(result)
 
 
-def _fetch_completed_v2(project_id, headers, projects, today_date,
-                        from_dt, to_dt, completed):
-    """Fetch completed tasks using unofficial TickTick v2 API with pagination."""
-    seen_ids = set()
-    # Try multiple endpoints
-    endpoints = [
-        f"{API_V2_BASE}/project/{project_id}/completed/",
-        f"{API_BASE}/project/{project_id}/completed",
-    ]
-    for url in endpoints:
-        try:
-            resp = httpx.get(url, headers=headers, timeout=10)
-            if resp.status_code != 200:
-                continue
+@app.get("/ticktick/debug/completed")
+async def debug_completed(projectId: str):
+    """Debug endpoint to test different completed tasks APIs."""
+    token = get_valid_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    results = {}
+
+    # 1. Official /data endpoint - check all keys
+    try:
+        resp = httpx.get(f"{API_BASE}/project/{projectId}/data", headers=headers, timeout=10)
+        results["v1_data_status"] = resp.status_code
+        if resp.status_code == 200:
             data = resp.json()
-            task_list = data if isinstance(data, list) else data.get("tasks", data.get("completedItems", []))
-            for task in task_list:
-                task_id = task.get("id", task.get("title"))
-                if task_id in seen_ids:
-                    continue
-                seen_ids.add(task_id)
+            results["v1_data_keys"] = list(data.keys())
+            results["v1_tasks_count"] = len(data.get("tasks", []))
+            # Show statuses of tasks
+            statuses = {}
+            for t in data.get("tasks", []):
+                s = t.get("status", "none")
+                statuses[str(s)] = statuses.get(str(s), 0) + 1
+            results["v1_task_statuses"] = statuses
+    except Exception as e:
+        results["v1_data_error"] = str(e)
 
-                due_date = task.get("dueDate")
-                completed_time = task.get("completedTime")
+    # 2. Try v2 completed endpoint
+    try:
+        resp = httpx.get(f"{API_V2_BASE}/project/{projectId}/completed/",
+                         headers=headers, timeout=10)
+        results["v2_completed_status"] = resp.status_code
+        results["v2_completed_body"] = resp.text[:500]
+    except Exception as e:
+        results["v2_completed_error"] = str(e)
 
-                # Date filter on completedTime or dueDate
-                filter_date = None
-                for dt_str in [completed_time, due_date]:
-                    if dt_str:
-                        try:
-                            filter_date = datetime.fromisoformat(
-                                dt_str.replace("Z", "+00:00")).date()
-                            break
-                        except (ValueError, TypeError):
-                            pass
+    # 3. Try official completed with params
+    try:
+        resp = httpx.get(f"{API_BASE}/project/{projectId}/completed",
+                         headers=headers, timeout=10,
+                         params={"from": "2026-03-01T00:00:00+0000",
+                                 "to": "2026-04-30T23:59:59+0000"})
+        results["v1_completed_status"] = resp.status_code
+        results["v1_completed_body"] = resp.text[:500]
+    except Exception as e:
+        results["v1_completed_error"] = str(e)
 
-                if from_dt and filter_date and filter_date < from_dt:
-                    continue
-                if to_dt and filter_date and filter_date > to_dt:
-                    continue
+    # 4. Try getting individual task with completed status
+    try:
+        resp = httpx.get(f"{API_BASE}/project/{projectId}/task",
+                         headers=headers, timeout=10)
+        results["v1_task_list_status"] = resp.status_code
+        results["v1_task_list_body"] = resp.text[:300]
+    except Exception as e:
+        results["v1_task_list_error"] = str(e)
 
-                task_info = {
-                    "title": task.get("title"),
-                    "project": projects.get(task.get("projectId"), "Inbox"),
-                    "priority": task.get("priority", 0),
-                    "due": due_date,
-                    "status": "completed",
-                }
-                if completed_time:
-                    task_info["completedTime"] = completed_time
-                completed.append(task_info)
-            if task_list:
-                break  # Got data from this endpoint, skip others
-        except Exception:
-            continue
+    return JSONResponse(results)
 
 
 def _process_task(task, projects, today_date, from_dt, to_dt,
                   tasks_today, overdue, no_date, completed,
-                  include_completed=False):
+                  include_completed=False, force_completed=False):
     status = task.get("status", 0)
-    is_completed = status != 0
+    is_completed = force_completed or status != 0
 
     if not include_completed and is_completed:
         return

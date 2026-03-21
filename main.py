@@ -251,6 +251,47 @@ def _process_task(task, projects, today_date, from_dt, to_dt,
         no_date.append(task_info)
 
 
+@app.get("/ticktick/tasks/raw")
+async def get_tasks_raw(
+    projectId: str = Query(...),
+):
+    """Return ALL raw task data from TickTick API for a project, including
+    descriptions, checklists, recurrence, subtasks, and every other field."""
+    token = get_valid_token()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    resp = httpx.get(f"{API_BASE}/project/{projectId}/data", headers=headers, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+
+    # Also try to get individual task details for richer data (content/desc)
+    raw_tasks = data.get("tasks", [])
+    enriched = []
+    for task in raw_tasks:
+        task_id = task.get("id")
+        if task_id:
+            try:
+                detail = httpx.get(
+                    f"{API_BASE}/project/{projectId}/task/{task_id}",
+                    headers=headers, timeout=10
+                )
+                if detail.status_code == 200:
+                    enriched.append(detail.json())
+                else:
+                    enriched.append(task)
+            except Exception:
+                enriched.append(task)
+        else:
+            enriched.append(task)
+
+    return JSONResponse({
+        "project_id": projectId,
+        "tasks": enriched,
+        "columns": data.get("columns", []),
+        "raw_keys": list(data.keys()),
+    })
+
+
 @app.get("/ticktick/projects")
 async def get_projects():
     token = get_valid_token()

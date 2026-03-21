@@ -17,6 +17,7 @@ TOKENS_FILE = "/data/tokens.json"
 AUTH_URL = "https://ticktick.com/oauth/authorize"
 TOKEN_URL = "https://ticktick.com/oauth/token"
 API_BASE = "https://api.ticktick.com/open/v1"
+API_V2_BASE = "https://api.ticktick.com/api/v2"
 
 # Only fetch tasks from these projects
 ALLOWED_PROJECTS = {
@@ -129,23 +130,14 @@ async def get_tasks(
                               tasks_today, overdue, no_date, completed,
                               include_completed=includeCompleted)
 
-        # Fetch completed tasks if requested
+        # Fetch completed tasks via unofficial v2 API
         if includeCompleted:
-            comp_resp = httpx.get(
-                f"{API_BASE}/project/{pid}/completed",
-                headers=headers,
-                params={"from": fromDate, "to": toDate} if fromDate and toDate else {},
-            )
-            if comp_resp.status_code == 200:
-                comp_data = comp_resp.json()
-                task_list = comp_data if isinstance(comp_data, list) else comp_data.get("tasks", [])
-                for task in task_list:
-                    _process_task(task, projects, today_date, from_dt, to_dt,
-                                  tasks_today, overdue, no_date, completed,
-                                  include_completed=True, force_completed=True)
+            _fetch_completed_v2(pid, headers, projects, today_date,
+                                from_dt, to_dt, completed)
 
     tasks_today.sort(key=lambda t: t["priority"], reverse=True)
     overdue.sort(key=lambda t: t["priority"], reverse=True)
+    completed.sort(key=lambda t: t.get("completedTime", ""), reverse=True)
 
     result = {
         "today": tasks_today,
@@ -159,11 +151,68 @@ async def get_tasks(
     return JSONResponse(result)
 
 
+def _fetch_completed_v2(project_id, headers, projects, today_date,
+                        from_dt, to_dt, completed):
+    """Fetch completed tasks using unofficial TickTick v2 API with pagination."""
+    seen_ids = set()
+    # Try multiple endpoints
+    endpoints = [
+        f"{API_V2_BASE}/project/{project_id}/completed/",
+        f"{API_BASE}/project/{project_id}/completed",
+    ]
+    for url in endpoints:
+        try:
+            resp = httpx.get(url, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            task_list = data if isinstance(data, list) else data.get("tasks", data.get("completedItems", []))
+            for task in task_list:
+                task_id = task.get("id", task.get("title"))
+                if task_id in seen_ids:
+                    continue
+                seen_ids.add(task_id)
+
+                due_date = task.get("dueDate")
+                completed_time = task.get("completedTime")
+
+                # Date filter on completedTime or dueDate
+                filter_date = None
+                for dt_str in [completed_time, due_date]:
+                    if dt_str:
+                        try:
+                            filter_date = datetime.fromisoformat(
+                                dt_str.replace("Z", "+00:00")).date()
+                            break
+                        except (ValueError, TypeError):
+                            pass
+
+                if from_dt and filter_date and filter_date < from_dt:
+                    continue
+                if to_dt and filter_date and filter_date > to_dt:
+                    continue
+
+                task_info = {
+                    "title": task.get("title"),
+                    "project": projects.get(task.get("projectId"), "Inbox"),
+                    "priority": task.get("priority", 0),
+                    "due": due_date,
+                    "status": "completed",
+                }
+                if completed_time:
+                    task_info["completedTime"] = completed_time
+                completed.append(task_info)
+            if task_list:
+                break  # Got data from this endpoint, skip others
+        except Exception:
+            continue
+
+
 def _process_task(task, projects, today_date, from_dt, to_dt,
                   tasks_today, overdue, no_date, completed,
-                  include_completed=False, force_completed=False):
+                  include_completed=False):
     status = task.get("status", 0)
-    is_completed = force_completed or status != 0
+    is_completed = status != 0
 
     if not include_completed and is_completed:
         return
@@ -180,7 +229,6 @@ def _process_task(task, projects, today_date, from_dt, to_dt,
     if completed_time:
         task_info["completedTime"] = completed_time
 
-    # Date filtering
     task_date = None
     if due_date:
         try:

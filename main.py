@@ -322,6 +322,15 @@ async def create_task(request: Request):
     return JSONResponse(resp.json())
 
 
+@app.delete("/ticktick/tasks/{task_id}")
+async def delete_task(task_id: str, projectId: str = Query(...)):
+    token = get_valid_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = httpx.delete(f"{API_BASE}/project/{projectId}/task/{task_id}", headers=headers)
+    resp.raise_for_status()
+    return JSONResponse({"status": "deleted", "taskId": task_id})
+
+
 @app.get("/ticktick/status")
 async def status():
     tokens = load_tokens()

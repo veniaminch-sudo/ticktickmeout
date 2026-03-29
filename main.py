@@ -314,7 +314,7 @@ async def create_task(request: Request):
         "title": body["title"],
         "projectId": body["projectId"],
     }
-    for field in ("content", "desc", "priority", "dueDate", "startDate"):
+    for field in ("content", "desc", "priority", "dueDate", "startDate", "columnId", "isAllDay", "timeZone"):
         if field in body:
             payload[field] = body[field]
     resp = httpx.post(f"{API_BASE}/task", headers=headers, json=payload)
